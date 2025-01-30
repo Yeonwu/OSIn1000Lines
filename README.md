@@ -2,19 +2,19 @@
 
 참고: https://github.com/nuta/operating-system-in-1000-lines
 
-## Getting Started
+## 시작하기
 
-### Environment
+### 환경
 
 - OS: Ubuntu 23.10
 - IDE: CLion
 
-### Installation
+### 설치
 가상의 CPU를 애뮬레이트하기 위해 QEMU를 사용한다.
 
 QEMU 설치 중 아래와 같은 오류가 발생하였다.
 
-```terminal
+```shell
 $sudo apt update
 
 E: The repository 'http://ports.ubuntu.com/ubuntu-ports mantic Release' no longer has a Release file.
@@ -24,7 +24,7 @@ N: Updating from such a repository can't be done securely, and is therefore disa
 Ubuntu 23.10 EOL일자(2024.7.11)가 도래함으로 인해 지원이 종료되어 Repository에 접근이 막혔다. 정석적인 해결방법은 Ubuntu 버전을 업그레이드 하는 것이지만, 시간이 너무 오래걸리고 귀찮으므로 보안 취약성을 무릅쓰고 구버전 Repository를 그냥 사용하기로 결정했다.
 
 `/etc/apt/source.list`의 원래 내용을 주석처리하고 아래 내용으로 변경하였다.
-```terminal
+```shell
 deb http://old-releases.ubuntu.com/ubuntu/ ㅡmantic main restricted universe multiverse
 deb http://old-releases.ubuntu.com/ubuntu/ ㅡmantic-updates main restricted universe multiverse
 deb http://old-releases.ubuntu.com/ubuntu/ ㅡmantic-security main restricted universe multiverse
@@ -34,7 +34,7 @@ deb http://old-releases.ubuntu.com/ubuntu/ ㅡmantic-security main restricted un
 
 
 이후 정상적으로 QEMU 설치를 마쳤다.
-```terminal
+```shell
 $sudo apt install qemu-system-riscv32
 $curl -LO https://github.com/qemu/qemu/raw/v8.0.4/pc-bios/opensbi-riscv32-generic-fw_dynamic.bin
 
@@ -46,9 +46,9 @@ Copyright (c) 2003-2022 Fabrice Bellard and the QEMU Project developers
 
 OpenSBI는 BIOS랑 비슷한 거라고 생각하면 된다.
 
-## RISC-V 101
+## RISC-V 기초
 
-### Assembly Basics
+### 어셈블리 기초
 
 어셈블리어는 기계어와 거의 1대1대응 관계이다. 
 ```
@@ -73,7 +73,7 @@ addi a0, a1, 123
 
 사실 레지스터는 그 용도가 정해져 있지는 않다. 원하는 용도로 사용해도 잘 동작하지만, 다른 소프트웨어와의 호환성을 위해 저렇게 용도가 정의되어있다.
 
-#### Memory Access
+#### 메모리 접근
 
 레지스터는 빠르지만 개수가 제한되어있다. 따라서 다음과 같은 흐름으로 데이터를 다룬다.
 
@@ -88,7 +88,7 @@ lw a0 (a1) // a1 주소에 저장된 word(32-bit 아키텍처이므로 32bit 크
 sw a0 (a1) // a0 레지스터에 저장된 word를 a1 주소에 저장한다. C로 치면 *a1 = *a0;
 ```
 
-#### Branch Instructions
+#### 브랜치 명령어
 
 브랜치 명령어는 If, For, While 등 제어문을 구현한다. 
 
@@ -100,7 +100,7 @@ label:
 ```
 `beq`(Branch if EQual), `bls`(Branch if LeSs than)과 같은 명령어도 있다.
 
-#### Function Calls
+#### 함수 호출
 
 `jal`(Jump And Link)와 `ret`(RETurn)을 사용해 함수 호출을 구현한다.
 
@@ -116,7 +116,7 @@ jal ra, <label> // label 위치에 정의된 함수를 실행한다. 리턴주�
 
 컨벤션에 따라 `a0`~`a7` 레지스터로 함수 인자를 넘겨주며, `a0` 레지스터에 리턴값을 저장한다. 
 
-#### Stack
+#### 스택
 
 FIFO구조의 메모리로, 아래방향으로 확장된다. 함수 호출, 로컬 변수 등에 사용된다. `sp` 레지스터에 스택의 top 주소를 저장한다.
 
@@ -129,7 +129,7 @@ lw sp, a0       // a0 = *sp
 addi sp, sp, 4  // sp = sp + 4
 ```
 
-#### CPU Mode & Privileged Instructions
+#### CPU 모드 & Privileged Instructions
 
 CPU는 모드에 따라 갖는 실행 권한이 달라진다. RISC-V에서는 다음 3가지 모드가 있다.
 
@@ -153,7 +153,7 @@ CPU는 모드에 따라 갖는 실행 권한이 달라진다. RISC-V에서는 �
 
 CSR(Control and Status Register)는 CPU 세팅을 저장하는 레지스터다.
 
-### Inline Assembly
+### 인라인 어셈블리
 
 C코드에 어셈블리를 삽입할 수 있다. 인라인 어셈블리를 사용하면 어셈블리 파일을 따로 작성하는 것에 비해 다음 2가지 장점이 있다.
 - C에서 사용하고 있는 변수를 바로 어셈블리로 가져올 수 있고, 어셈블리에서 C언어 변수에 값을 할당할 수 있다. 
@@ -199,3 +199,440 @@ csrw sscratch, a0
 ```
 
 "r", "=r"을 constraint 라고 부른다. 인라인 어셈블리를 컴파일러가 어셈블리로 바꿀 때 어떻게 바꿀지를 지정한다.
+
+## 부팅 
+
+컴퓨터 전원이 켜지면 가장 먼저 BIOS가 실행된다. 하드웨어를 초기화하고, 시작화면을 표시하고, OS를 디스크에서 읽어와 메모리에 올리고 실행시킨다.
+
+QEMU 가상머신에서 BIOS의 기능을 하는 것이 OpenSBI이다.
+
+Supervisor Binary Interface, SBI는 운영체제 커널에게 펌웨어가 제공하는 API 스펙이고, 가장 유명한 구현체가 Open SBI이다.
+
+SBI 스펙은 [Github](https://github.com/riscv-non-isa/riscv-sbi-doc/releases)에 공개되어 있으며, 시리얼 포트 등 디버그 콘솔에 문자 표시, 다시시작/종료, 타이머 등의 기능이 정의되어있다.
+
+### OpenSBI 부팅하기
+
+`run.sh`파일을 아래와 같이 작성하고 실행하자.
+
+```shell
+#!/bin/bash
+
+set -xue
+
+QEMU=qemu-system-riscv32
+
+$QEMU -machine virt -bios default -nographic -serial mon:stdio --no-reboot
+```
+
+QEMU는 가상머신 시작 시 다양한 옵션을 설정할 수 있다. 여기에 사용한 옵션은 다음과 같다.
+
+- `-machine virt`: 가상환경에서 머신을 시작한다. `-machine ?` 옵션으로 다른 머신들을 확인할 수 있다.
+- `-bios default`: 기본 펌웨어(OpenSBI)를 사용한다.
+- `-nographic`: GUI 없이 실행한다.
+- `serial mon:stdio`: QEMU의 표준 입출력을 가상머신의 시리얼 포트에 연결한다. `mon:`은 Ctrl+A, C를 눌러 QEMU 모니터로 전환할 수 있게 해준다.
+- `--no-reboot`: 가상머신에서 충돌이 일어나도 재부팅하지 않게한다. 디버깅에 유용하다.
+
+`run.sh`을 실행하면 아래와 같은 배너가 출력된다.
+
+```shell
+OpenSBI v1.2
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : medeleg
+Platform HART Count       : 1
+Platform IPI Device       : aclint-mswi
+Platform Timer Device     : aclint-mtimer @ 10000000Hz
+Platform Console Device   : uart8250
+Platform HSM Device       : ---
+...
+```
+
+OpenSBI 버전, 플랫폼 이름, HART 개수(CPU 코어) 등 디버깅에 필요한 정보들이 출력된다.
+
+키보드를 눌러도 아무 일도 없는데, QEMU의 표준 입출력이 가상머신의 시리얼 포트에 연결되어 있기 때문이다. OpenSBI가 입력된 문자를 받고 있지만, 이를 읽어서 사용하는 프로그램(OS 등)이 없어 버려지고 있는 것이다.
+
+Ctrl+A, C를 눌러 QEMU 디버그 콘솔(QEMU 모니터)로 전환할 수 있다. q를 누르면 QEMU에서 나갈 수 있다.
+
+```shell
+QEMU 8.0.4 monitor - type 'help' for more information
+(qemu) q
+```
+
+### 링커 스크립트
+
+링커 스크립트는 실행파일의 메모리 구조를 결정하는 파일이다. 링커는 함수와 변수에 메모리 주소를 할당할 때 링커 스크립트에 정의된 구조를 따른다.
+
+`kernel.ld`라는 이름의 파일을 만들고 아래와 같이 작성하자.
+
+```linkerscript
+/* 엔트리 포인트는 boot 함수이다. */
+ENTRY(boot)
+
+SECTIONS {
+    /* 해당 주소에서 시작한다. .은 현재 주소를 나타낸다.*/
+    . = 0x80200000;
+    /* text 영역 */
+    .text :{
+    /* .text.boot 영역은 항상 맨 처음에 배치된다. */
+        KEEP(*(.text.boot));
+        /* .text 영역과 .text로 시작하는 모든 영역을 이곳에 배치한다. */
+        *(.text .text.*);
+    }
+    /* rodata 영역, 4Byte로 나누어 떨어지도록 맞춘다. */
+    .rodata : ALIGN(4) {
+        *(.rodata .rodata.*);
+    }
+    /* data 영역, 4Byte로 나누어 떨어지도록 맞춘다. */
+    .data : ALIGN(4) {
+        *(.data .data.*);
+    }
+    /* bss 영역, 4Byte로 나누어 떨어지도록 맞춘다. */
+    .bss : ALIGN(4) {
+        /* bss 영역 시작 주소를 __bss에 저장한다. */
+        __bss = .;
+        *(.bss .bss.* .sbss .sbss.*);
+        /* bss 영역 끝 주소를 __bss_end에 저장한다. */
+        __bss_end = .;
+    }
+
+    . = ALIGN(4);
+    /* 현재 주소를 128 * 1024 Byte(128 KB)만큼 증가시켜 스택 영역을 확보한다.*/
+    . += 128 * 1024;
+    /* 스택 영역 시작 주소를 __stack_top에 저장한다. 스택은 아래로 자란다. (push 연산시 top은 감소) */
+    __stack_top = .;
+}
+```
+
+### 간단한 커널
+`kernel.c` 파일을 만들고 아래와 같이 작성하자.
+```c
+typedef unsigned char uint8_t;
+typedef unsigned int uint32_t;
+typedef uint32_t size_t;
+
+extern char __bss[], __bss_end[], __stack_top[]; 
+// 링커 스크립트에 정의된 변수를 가져온다.
+// extern: 외부 변수를 가져오겠다는 의미이다. 이 경우에는 링커 스크립트에 정의된 외부변수이다.
+// char: 메모리 주소가 중요하기 때문에 포인터 타입은 중요하지 않다.
+// []: __bss는 bss 영역의 시작점에 저장된 값을 의미한다. __bss[]로 작성해야 주소를 가져올 수 있다.
+
+
+void *memset(void *buf, char c, size_t n) {
+    uint8_t *p = (uint8_t *) buf;
+    while (n--)
+        *p++ = c;
+    return buf;
+}
+
+void kernel_main(void) {
+    // bss 영역의 값을 0으로 초기화해준다.
+    memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
+
+    for (;;);
+}
+
+__attribute__((section(".text.boot")))
+__attribute__((naked))
+// __attribute__은 GCC 컴파일러가 제공하는 확장기능이다(표준은 아니다). 함수속성, 변수속성, 타입속성이 존재한다.
+// boot 함수에 적용된 속성은 두가지인데, section("section name")속성은 대상을 section name 영역에 위치시킨다.
+// 여기서는 함수를 .text.boot 영역에 위치시킨다.
+// naked 속성은 함수에 불필요한 명령(예를 들어 리턴문 등)을 추가하지 않게 한다. 
+// 이를 통해 인라인 어셈블리 내용과 함수 내용을 일치시킨다.
+void boot(void) {
+    // boot 함수가 링커 스크립트에서 엔트리 포인트로 설정되었으므로 이 함수가 가장 먼저 실행된다.
+    __asm__ __volatile__(
+        "mv sp, %[stack_top]\n" // 스택 포인터 레지스터에 링커 스크립트에서 설정한 값을 넣는다.
+        "j kernel_main\n"       // kernel_main 함수로 점프한다.
+        :
+        : [stack_top] "r" (__stack_top) // %[stack_top]에 __stack_top 변수 값을 전달한다.
+    );
+}
+```
+
+### 커널 컴파일 & 실행
+
+run.sh를 다음과 같이 변경하자.
+```shell
+#!/bin/bash
+set -xue
+
+QEMU=qemu-system-riscv32
+
+# 
+CC=clang
+CFLAGS="-std=c11 -O2 -g3 -Wall -Wextra --target=riscv32 -ffreestanding -nostdlib"
+
+# Build the kernel
+$CC $CFLAGS -Wl,-Tkernel.ld -Wl,-Map=kernel.map -o kernel.elf kernel.c
+
+# Start QEMU
+$QEMU -machine virt -bios default -nographic -serial mon:stdio --no-reboot -kernel kernel.elf
+```
+
+clang 컴퍼일러에 설정하는 옵션은 다음과 같다.
+
+- `-std=c11`: C11을 사용한다.
+- `-O2`: O2 수준으로 최적화한다.
+- `-g3`: 디버그 정보를 최대한으로 생성한다.
+- `-Wall`: 주요한 Warning을 활성화한다.
+- `-Wextra`: 추가적인 Warning을 활성화한다.
+- `--target=riscv32`: 32bit risc-v cpu 대상으로 컴파일한다.
+- `-ffreestanding`: 개발 환경에서 제공하는 표준 라이브러리를 사용하지 않는다.
+- `-nostdlib`: 표준 라이브러리를 링크하지 않는다.
+- `-Wl,-Tkernel.ld`: kernel.ld 링크 스크립트를 사용한다.
+- `-Wl,-Map=kernel.map`: 링커가 메모리를 할당한 결과를 Map 파일로 저장한다.
+
+`-Wl`은 컴파일러가 아닌 링커에게 넘겨주는 옵션이다.
+
+run.sh를 실행하면 이전과 다를 것 없이 아무런 입력도, 출력도 없다. 작성한 커널이 정상적으로 실행되는지 확인하기 위해서는 QEMU의 디버깅 기능을 사용하면 된다.
+QEMU 모니터로 전환한 후, `info register`를 입력하면 현재 레지스터에 저장된 값이 출력된다. 그 중 pc, 프로그램 카운터 레지스터 값을 확인하자.
+
+```
+QEMU 8.0.2 monitor - type 'help' for more information
+(qemu) info registers
+
+CPU#0
+ V      =   0
+ pc       8020004c
+ ...
+```
+8020004c 주소에서 프로그램 카운터가 멈춰있다. 값은 환경에 따라 다를 수 있다.
+다음으로 llvm-objdump를 사용해 kernel.elf 파일을 분석해보자.
+
+```
+kernel.elf:     file format elf32-littleriscv
+
+Disassembly of section .text:
+
+// boot 함수 부분이다.
+80200000 <boot>:
+80200000: 37 05 22 80   lui     a0, 524832
+80200004: 13 05 05 05   addi    a0, a0, 80
+80200008: 2a 81         mv      sp, a0
+8020000a: 6f 00 a0 01   j       0x80200024 <kernel_main> // kernel_main을 실행한다.
+8020000e: 00 00         unimp
+
+...
+
+80200024 <kernel_main>:
+80200024: 37 05 20 80   lui     a0, 524800
+80200028: 13 05 05 05   addi    a0, a0, 80
+8020002c: b7 05 20 80   lui     a1, 524800
+80200030: 93 85 05 05   addi    a1, a1, 80
+80200034: 33 86 a5 40   sub     a2, a1, a0
+80200038: 11 ca         beqz    a2, 0x8020004c <.LBB1_3>
+8020003a: b3 05 b5 40   sub     a1, a0, a1
+
+...
+
+8020004c <.LBB1_3>:
+8020004c: 01 a0         j       0x8020004c <.LBB1_3> // 프로그램 카운터는 여기 위치해있다. 계속해서 같은 위치로 점프하는 무한 루프이므로, 커널이 잘 실행되고 있음을 알 수 있다.
+```
+
+## Hello world!
+
+### ecall
+
+콘솔에 문자를 출력하기 위해서 SBI에서 제공하는 API인 `ecall`를 사용한다.
+
+```c
+// 인자를 받아 `ecall`을 호출한다. 
+struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4, long arg5, long fid, long eid) {
+    register long a0 __asm__("a0") = arg0; // a0 레지스터에 arg0 값을 넣는다. register와 __asm__("a0") 키워드를 사용해 a0 변수를 a0 레지스터에 저장한다.
+    register long a1 __asm__("a1") = arg1;
+    register long a2 __asm__("a2") = arg2;
+    register long a3 __asm__("a3") = arg3;
+    register long a4 __asm__("a4") = arg4;
+    register long a5 __asm__("a5") = arg5;
+    register long a6 __asm__("a6") = fid;
+    register long a7 __asm__("a7") = eid;
+
+    __asm__ __volatile__("ecall"
+    : "=r"(a0), "=r"(a1)
+    : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5), "r"(a6), "r"(a7)
+    : "memory");
+
+    return (struct sbiret){.error = a0, .value = a1};
+}
+```
+
+`ecall`에 대한 스펙은 다음과 같이 정의되어 있다.
+
+> 챕터 3
+> 모든 SBI 함수는 하나의 바이너리 인코딩을 공유하며, 이는 SBI 확장들이 호환되기 쉽도록 한다. SBI 스펙은 다음 관례를 따른다.
+>
+> - ECALL은 Supervisor와 SEE(Supervisor Execution Environment) 사이의 제어 전환 명령으로 사용된다.
+> - a7 레지스터는 SBI Extension ID(EID)를 인코딩한다.
+> - a6 레지스터는 SBI funciton ID(FID)를 인코딩한다.
+> - 호출자는 a0, a1을 제외한 모든 레지스터를 SBI 호출간에 보존해야 한다.
+> - SBI 함수는 a0에 에러 코드를, a1에 리턴값을 넣어 리턴해야 한다.
+> 
+> -- "RISC-V Supervisor Binary Interface Specification" v2.0-rc1
+
+ecall이 호출되는 순간, CPU의 모드는 커널 모드(S-Mode, Supervisor)에서 OpenSBI 모드(M-Mode, SEE)로 전환된다. OpenSBI가 호출된 SBI 함수 실행을 끝내면 다시 커널 모드로 돌아온다.
+
+콘솔에 문자를 출력하기 위해서는 console_putchar 함수를 호출하면 된다.
+
+> 5.2. 확장: Console Putchar (EID #0x01)
+```c 
+long sbi_console_putchar(int ch)
+```
+> ch에 들어있는 데이터를 디버그 콘솔에 쓴다.
+> sbi_console_getchar()와 달리, 전송중인 문자가 남아있거나 터미널이 준비되지 않았다면 블록된다.
+> 만약 콘솔이 존재하지 않는다면 문자는 버려진다.
+> 실행에 성공할 경우 0을 리턴하며, 실패할 경우 음수(구현에 따라 다름)을 리턴한다.
+> -- "RISC-V Supervisor Binary Interface Specification" v2.0-rc1
+
+이에 맞게 작성한 putchar 함수는 다음과 같다.
+```c
+void putchar(char ch) {
+    sbi_call(ch, 0, 0, 0, 0, 0, 0, 1);
+}
+```
+
+hello world!를 출력하기 위해 kernel_main 함수를 수정하자.
+```c
+void kernel_main(void) {
+    memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
+
+    const char* s = "\n\nhello world!\n";
+    for (int i = 0; s[i] != '\0'; i++) {
+        putchar(s[i]);
+    }
+
+    for (;;) {
+        __asm__ __volatile__("wfi");
+    }
+}
+```
+
+run.sh를 실행하면 hello world!가 출력된다.
+
+hello world!가 출력되는 과정을 좀 더 자세히 살펴보자.
+
+1. 커널이 ecall 명령어를 실행한다. CPU는 OpenSBI가 부팅시 세팅해놓은 M-mode trap handler로 점프한다.(mtvec 레지스터) 
+2. 레지스터를 저장한 후, [C언어로 작성된 trap handler](https://github.com/riscv-software-src/opensbi/blob/0ad866067d7853683d88c10ea9269ae6001bcf6f/lib/sbi/sbi_trap.c#L263)가 실행된다.
+3. EID에 따라 대응하는 [SBI함수](https://github.com/riscv-software-src/opensbi/blob/0ad866067d7853683d88c10ea9269ae6001bcf6f/lib/sbi/sbi_ecall_legacy.c#L63C2-L65)가 호출된다.
+4. 8250 UART [드라이버](https://github.com/riscv-software-src/opensbi/blob/0ad866067d7853683d88c10ea9269ae6001bcf6f/lib/utils/serial/uart8250.c#L77)가 QEMU에 문자를 전송한다.
+5. QEMU의 8250 UART 에뮬레이션 구현체가 문자를 받아 표준 출력으로 전송한다.
+6. 터미널 에뮬레이터가 문자를 표시한다.
+
+### printf
+
+아래와 같이 간단한 printf 함수를 구현할 수 있다. 가변 인자를 받기 위한 `va_list, va_start, va_arg, va_end`는 C 표준 라이브러리인 stdargs.h에 정의되어 있지만, 여기서는 Clang에 빌트인된 `__builtin_va_...`를 사용한다.
+
+`common.h`
+```c
+#pragma once
+
+#ifndef OSIN1000LINES_COMMON_H
+#define OSIN1000LINES_COMMON_H
+
+#define va_list __builtin_va_list
+#define va_start __builtin_va_start
+#define va_end __builtin_va_end
+#define va_arg __builtin_va_arg
+
+void printf(const char* format, ...);
+
+#endif //OSIN1000LINES_COMMON_H
+```
+
+`common.c`
+```c
+#include "common.h"
+
+void putchar(char ch);
+
+void printf(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    char next;
+
+    while (*format != '\0') {
+        if (*format == '%') {
+            next = *(format + 1);
+            if (next == '\0') {
+                putchar('%');
+                continue;
+            } else if (next == 'd') {
+                int arg = va_arg(args, int);
+
+                if (arg < 0) {
+                    putchar('-');
+                    arg *= -1;
+                }
+
+                int digits = 1;
+                while (digits * 10 < arg) digits *= 10;
+                while (digits > 0) {
+                    putchar('0' + arg / digits % 10);
+                    digits /= 10;
+                }
+                format++;
+            } else if (next == 's') {
+                const char* arg = va_arg(args, const char *);
+                while (*arg != '\0') {
+                    putchar(*arg++);
+                }
+                format++;
+            } else if (next == 'x') {
+                const int arg = va_arg(args, int);
+                for (int i = 7; i >= 0; i--) {
+                    putchar("0123456789abcdef"[arg >> (i * 4) & 0xF]);
+                }
+                format++;
+            } else if (next == '%') {
+                putchar('%');
+                format++;
+            }
+        } else {
+            putchar(*format);
+        }
+
+        format++;
+    }
+
+    va_end(args);
+}
+```
+
+이후 kernel.c에서 common.h를 include하고, run.sh에서 컴파일 대상에 common.c를 추가한 후 실행한다.
+
+`run.sh`
+```shell
+...
+$CC $CFLAGS -Wl,-Tkernel.ld -Wl,-Map=kernel.map -o kernel.elf \
+  kernel.c common.c
+...
+```
+
+`kernel.c`
+```c
+#include common.h
+
+...
+
+void kernel_main(void) {
+    memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
+
+    const char* s = "\n\nhello world!\n";
+    printf("console: %s", s);
+    printf("date: %d %d %d\n", 2025, 1, 0);
+    printf("%x\n", 0x1234abcd);
+
+    for (;;) {
+        __asm__ __volatile__("wfi");
+    }
+}
+
+...
+```
