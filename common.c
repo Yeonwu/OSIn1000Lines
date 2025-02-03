@@ -6,6 +6,56 @@
 
 void putchar(char ch);
 
+void *memset(void *buf, char c, size_t n) {
+    uint8_t *p = (uint8_t *) buf;
+
+    while (n--)
+        *p++ = c;
+
+    return buf;
+}
+
+void *memcpy(void *dst, void *src, size_t n) {
+    uint8_t *p_src = (uint8_t *)src;
+    uint8_t *p_dst = (uint8_t *)dst;
+
+    while (n--)
+        *p_dst++ = *p_src++;
+
+    return dst;
+}
+
+char* strcpy(char *dst, const char *src) {
+    char* d = dst;
+
+    while (*src != '\0')
+        *d++ = *src++;
+    *d = '\0';
+
+    return dst;
+}
+
+// s1 > s2 양수
+// s1 < s2 음수
+int strcmp(const char *s1, const char *s2) {
+    while (*s1 != '\0' && *s2 != '\0') {
+        if (*s1 != *s2) break;
+        s1++;
+        s2++;
+    }
+    return *(unsigned char *) s1 - *(unsigned char *) s2;
+}
+
+int str_same(const char *s1, const char *s2) {
+    return strcmp(s1, s2) == 0;
+}
+int str_large(const char *s1, const char *s2) {
+    return strcmp(s1, s2) > 0;
+}
+int str_small(const char *s1, const char *s2) {
+    return strcmp(s1, s2) < 0;
+}
+
 void printf(const char* format, ...) {
     va_list args;
     va_start(args, format);
