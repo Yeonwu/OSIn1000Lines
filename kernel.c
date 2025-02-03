@@ -37,6 +37,7 @@ void kernel_main(void) {
 
     const char* s = "\n\nhello world!\n";
     printf("console: %s", s);
+    PANIC("AHHHHHH!");
     printf("date: %d %d %d\n", 2025, 1, 0);
     printf("%x\n", 0x1234abcd);
 

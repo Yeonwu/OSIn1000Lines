@@ -783,3 +783,69 @@ int str_small(const char *s1, const char *s2) {
 }
 ```
 
+## 커널 패닉
+
+커널 패닉은 커널이 회복 불가능한 오류가 발생했을 때 일어난다. 윈도우나 리눅스의 블루 스크린과 같은 컨셉이다. 
+
+`kernel.h`에 정의한 다음 `PANIC` 매크로를 사용해 커널 패닉이 일어났을 때 디버깅 정보를 출력하고, 프로그램을 멈출 수 있다.
+
+```c
+#define PANIC(fmt, ...)                                                         \
+    do {                                                                        \
+        printf("PANIC: %s:%d " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);    \
+        while(1) {}                                                             \
+    } while(0)
+```
+
+함수가 아닌 매크로로 정의한 이유는 `__FILE__`, `__LINE__`을 사용하기 위해서이다. 만약 함수로 작성했다면 `PANIC`이 일어난 곳이 아닌, `PANIC`함수가 정의된 파일과 라인이 출력된다.
+
+`do {...} while(0)`은 C언어에서 여러줄로 구성된 매크로를 작성할 때 사용하는 관례이다. 그냥 `{...}`로 묶을 수도 있겠지만, 이 경우 아래 코드와 같이 `if`문과의 부작용이 발생할 수 있다.
+
+```c
+#define SWAP(x, y) { \
+    int tmp = x;     \
+    x = y;           \
+    y = tmp;         \
+}
+
+if (...) 
+    SWAP(x, y);
+else
+    ...
+// 위 코드는 아래와 같이 해석되며, 에러를 발생시킨다.
+
+if (...)
+    {int tmp = x;x = y;y = tmp;}; // if문 다음에 세미콜론이 붙는다!
+else
+    ...
+```
+
+줄 마지막에 `\`이 붙었기 때문에 컴파일러가 매크로를 해석할 때 줄바꿈을 무시하고 한 줄로 취급한다.
+
+`__VA_ARGS__`는 매크로에서 가변인자를 사용할 수 있도록 해주는 매크로이다. 앞에 붙은 "##"은 가변인자가 주어지지 않았을 때 앞의 콤마를 지워주는 역할을 한다.
+
+`kernel.c`의 `kernel_main` 함수에서 커널 패닉을 일으켜보자.
+```c
+void kernel_main(void) {
+    memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
+
+    const char* s = "\n\nhello world!\n";
+    printf("console: %s", s);
+    
+    PANIC("AHHHHHH!");
+    
+    printf("date: %d %d %d\n", 2025, 1, 0);
+    printf("%x\n", 0x1234abcd);
+
+    for (;;) {
+        __asm__ __volatile__("wfi");
+    }
+}
+```
+출력:
+```
+hello world!
+PANIC: kernel.c:40 AHHHHHH!
+```
+
+패닉 이후의 코드는 실행되지 않는걸 확인할 수 있다.
