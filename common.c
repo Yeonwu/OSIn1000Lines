@@ -76,7 +76,7 @@ void printf(const char* format, ...) {
                 }
 
                 int digits = 1;
-                while (digits * 10 < arg) digits *= 10;
+                while (digits * 10 <= arg) digits *= 10;
                 while (digits > 0) {
                     putchar('0' + arg / digits % 10);
                     digits /= 10;
