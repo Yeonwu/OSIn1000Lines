@@ -849,3 +849,231 @@ PANIC: kernel.c:40 AHHHHHH!
 ```
 
 패닉 이후의 코드는 실행되지 않는걸 확인할 수 있다.
+
+## 예외
+
+예외처리는 커널이 다양한 이벤트에 대응할 수 있도록하는 CPU의 기능이다. CPU가 잘못된 메모리 접근, 잘못된 명령어 사용, 시스템 콜 등을 마주쳤을 때 예외처리가 일어난다. 예외처리는 `try-catch`문과 비슷하게 작동하는데, 정상적으로 프로그램을 실행하다 커널이 처리해야할 이벤트가 일어나면 예외를 발생시켜 기존 콘텍스트에서 예외처리 콘텍스트로 넘어간다. `try-catch`와 다른 점은 예외처리가 끝나면 예외가 발생한 지점으로 돌아가 이어서 프로그램을 실행할 수 있다는 점이다.
+
+예외는 커널모드에서도 일어날 수 있으며, 그런 예외는 치명적인 커널 버그로 이어진다. 만약 QEMU가 비정상적으로 다시 시작하거나, 커널이 의도한데로 작동하지 않는다면 예외가 일어났을 확률이 높다. 때문에 예외가 발생했을 때 커널 패닉을 일으켜 디버깅을 용이하게 하기 위해 예외처리를 먼저 구현했다.
+
+### 예외 라이프 사이클
+
+RISC-V에서 예외는 다음과 같이 처리된다.
+
+1. CPU가 `medeleg` 레지스터를 확인해 어떤 모드에서 예외를 처리할지 결정한다. OpenSBI에 의해 U-Mode(유저), S-Mode(커널)에서 발생한 예외를 S-Mode(커널)에서 정의된 핸들러가 처리하도록 설정되어 있다.
+2. CPU가 자신의 상태를 여러 CSR(Control and Status Register)에 저장한다. 대표적으로는 예외의 종류를 저장하는 `scause`, 예외 종류에 따른 추가 정보(예외 발생 메모리 주소 등)를 저장하는 `stval`, 예외가 발생한 프로그램 카운터 위치를 저장하는 `sepc`, 예외가 발생한 모드(U-Mode/S-Mode 등)을 저장하는 `sstatus`등이 있다.
+3. 프로그램 카운터 값이 `stvec` 레지스터에 저장된 값으로 바뀐다. (따라서 `stvec` 레지스터에 예외 핸들러의 메모리 주소를 저장해두어야 한다.)
+4. 예외 핸들러가 예외를 처리한다.
+
+예외 핸들러가 호출되면 다음과 같이 동작한다.
+1. 현재 레지스터들을 저장한다.
+2. 예외를 처리한다.
+3. 저장해둔 레지스터 값을 불러와 예외 처리 전과 같은 상태로 되돌린다.
+4. `sret`명령을 호출해 예외가 일어났던 지점으로 복귀한다.
+
+#### `ret` vs `sret`, `mret`, `uret`
+
+`ret`은 함수 실행이 끝나고 호출된 지점으로 복귀하는 명령어이다. 실제로 존재하는 명령어가 아닌 의사 명령어로, CPU는 `ret`이 호출되면 `jalr x0, 0(x1)`을 실행한다. 이는 `x1` 레지스터에 저장된 함수 호출 주소로 점프하라는 뜻이다.
+
+반면 `sret`, `mret`, `uret`(이하 `xret`)은 실제 명령어이다. RISC-V privileged document에 의하면, 
+> `xret`은 x-Mode에서 발생한 트랩에서 리턴하기 위해 사용된다. `xret`이 호출되었을 때 `xPP` 값이 `y`이고, `x IE`가 `x PIE`로 설정되었다고 가정하자. 권한 모드는 `y-Mode`로 변경되고, `x PIE`는 1로, `xPP`는 `U`로(U-Mode가 지원되지 않을 경우 M으로) 변경된다.
+
+[출처](https://stackoverflow.com/questions/73103031/what-is-the-difference-between-mret-and-ret-instruction-in-machine-mode)
+
+### 예외 핸들러 
+예외 핸들러에 사용한 매크로와 타입을 `kernel.h`에 작성한다. `READ_CSR`, `WRITE_CSR` 매크로는 CSR을 조작하기 위한 매크로이다. `trap_frame` 구조체는 예외 핸들러가 저장한 레지스터 값을 읽어오기 위해 사용하는 구조체이다. 
+```c
+#define READ_CSR(reg)                                           \
+({                                                              \
+    unsigned long __tmp;                                        \
+    __asm__ __volatile__ ("csrr %0, " #reg : "=r"(__tmp));      \
+    __tmp;                                                      \
+})
+
+#define WRITE_CSR(reg, value)                                   \
+do {                                                            \
+    uint32_t __tmp = (value);                                     \
+    __asm__ __volatile__ ("csrw " #reg ", %0" :: "r"(__tmp));   \
+} while(0)
+
+struct trap_frame {
+    uint32_t ra;
+    uint32_t gp;
+    uint32_t tp;
+    uint32_t t0;
+    uint32_t t1;
+    uint32_t t2;
+    uint32_t t3;
+    uint32_t t4;
+    uint32_t t5;
+    uint32_t t6;
+    uint32_t a0;
+    uint32_t a1;
+    uint32_t a2;
+    uint32_t a3;
+    uint32_t a4;
+    uint32_t a5;
+    uint32_t a6;
+    uint32_t a7;
+    uint32_t s0;
+    uint32_t s1;
+    uint32_t s2;
+    uint32_t s3;
+    uint32_t s4;
+    uint32_t s5;
+    uint32_t s6;
+    uint32_t s7;
+    uint32_t s8;
+    uint32_t s9;
+    uint32_t s10;
+    uint32_t s11;
+    uint32_t sp;
+} __attribute__((packed));
+```
+
+아래와 같이 `kernel.c`에 예외 핸들러를 작성한다. 위에서 설명한 예외 핸들러의 동작과 똑같이 동작한다.
+```c
+__attribute__((naked))
+__attribute__((aligned(4)))
+void kernel_entry(void) {
+    __asm__ __volatile__(
+            "csrw sscratch, sp\n"       // 현재 스택 포인터 값 저장
+            "addi sp, sp, -4 * 31\n"    // 현재 스택 포인터 -= 4 * 31 (32바이트 크기의 스택 확보)
+
+            "sw ra,  4 * 0(sp)\n"       // 스택에 현재 레지스터 값 전부 저장
+            "sw gp,  4 * 1(sp)\n"
+            "sw tp,  4 * 2(sp)\n"
+            "sw t0,  4 * 3(sp)\n"
+            "sw t1,  4 * 4(sp)\n"
+            "sw t2,  4 * 5(sp)\n"
+            "sw t3,  4 * 6(sp)\n"
+            "sw t4,  4 * 7(sp)\n"
+            "sw t5,  4 * 8(sp)\n"
+            "sw t6,  4 * 9(sp)\n"
+            "sw a0,  4 * 10(sp)\n"
+            "sw a1,  4 * 11(sp)\n"
+            "sw a2,  4 * 12(sp)\n"
+            "sw a3,  4 * 13(sp)\n"
+            "sw a4,  4 * 14(sp)\n"
+            "sw a5,  4 * 15(sp)\n"
+            "sw a6,  4 * 16(sp)\n"
+            "sw a7,  4 * 17(sp)\n"
+            "sw s0,  4 * 18(sp)\n"
+            "sw s1,  4 * 19(sp)\n"
+            "sw s2,  4 * 20(sp)\n"
+            "sw s3,  4 * 21(sp)\n"
+            "sw s4,  4 * 22(sp)\n"
+            "sw s5,  4 * 23(sp)\n"
+            "sw s6,  4 * 24(sp)\n"
+            "sw s7,  4 * 25(sp)\n"
+            "sw s8,  4 * 26(sp)\n"
+            "sw s9,  4 * 27(sp)\n"
+            "sw s10, 4 * 28(sp)\n"
+            "sw s11, 4 * 29(sp)\n"
+
+            "csrr a0, sscratch\n"       // 저장해둔 스택 포인터 값을 다시 불러와서 스택에 저장
+            "sw a0, 4 * 30(sp)\n"
+
+            "mv a0, sp\n"               // a0 레지스터에 현재 스택 포인터값을 넣어 handle_trap 호출 시 인자로 넘겨준다.
+            // handle_trap 함수는 struct trap frame* 타입의 인자를 하나 받는다.
+            // 스택에 값들을 넣고 난 다음의 스택 포인터 주소를 넘겨주어 struct trap frame*로 사용한다.
+            "call handle_trap\n"        // handle_trap 함수 호출
+
+
+            "lw ra,  4 * 0(sp)\n"       // 스택에 넣어두었던 값을 다시 레지스터로 가져온다.
+            "lw gp,  4 * 1(sp)\n"
+            "lw tp,  4 * 2(sp)\n"
+            "lw t0,  4 * 3(sp)\n"
+            "lw t1,  4 * 4(sp)\n"
+            "lw t2,  4 * 5(sp)\n"
+            "lw t3,  4 * 6(sp)\n"
+            "lw t4,  4 * 7(sp)\n"
+            "lw t5,  4 * 8(sp)\n"
+            "lw t6,  4 * 9(sp)\n"
+            "lw a0,  4 * 10(sp)\n"
+            "lw a1,  4 * 11(sp)\n"
+            "lw a2,  4 * 12(sp)\n"
+            "lw a3,  4 * 13(sp)\n"
+            "lw a4,  4 * 14(sp)\n"
+            "lw a5,  4 * 15(sp)\n"
+            "lw a6,  4 * 16(sp)\n"
+            "lw a7,  4 * 17(sp)\n"
+            "lw s0,  4 * 18(sp)\n"
+            "lw s1,  4 * 19(sp)\n"
+            "lw s2,  4 * 20(sp)\n"
+            "lw s3,  4 * 21(sp)\n"
+            "lw s4,  4 * 22(sp)\n"
+            "lw s5,  4 * 23(sp)\n"
+            "lw s6,  4 * 24(sp)\n"
+            "lw s7,  4 * 25(sp)\n"
+            "lw s8,  4 * 26(sp)\n"
+            "lw s9,  4 * 27(sp)\n"
+            "lw s10, 4 * 28(sp)\n"
+            "lw s11, 4 * 29(sp)\n"
+            "lw sp, 4 * 30(sp)\n"
+
+            "sret\n"                  // kernel_entry가 호출되었던 지점으로 복귀
+            );
+}
+```
+`kernel_entry`가 호출하는 `handle_trap` 함수 또한 `kernel.c`에 작성한다. CSR에 저장된 예외에 대한 정보를 읽어와 `PANIC`으로 출력한다.
+```c
+void handle_trap(struct trap_frame* f) {
+    uint32_t scause = READ_CSR(scause);
+    uint32_t stval = READ_CSR(stval);
+    uint32_t user_pc = READ_CSR(sepc);
+
+    PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
+}
+```
+마지막으로 `kernel_main`함수에서 `kernel_entry`함수를 예외 핸들러로 등록해주고, 예외 상황을 발생시키는 명령을 호출한다.
+```c
+void kernel_main(void) {
+    memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
+
+    // CPU는 stcvec 레지스터에 저장된 주소를 예외 핸들러 주소로 사용한다.
+    WRITE_CSR(stvec, (uint32_t) kernel_entry);
+
+    const char* s = "\n\nhello world!\n";
+    printf("console: %s", s);
+    printf("date: %d %d %d\n", 2025, 1, 0);
+
+    // unimp 명령 호출시 예외가 발생한다.
+    __asm__ __volatile__("unimp");
+
+    // 커널 패닉이 발생하므로 아래 코드는 실행되지 않는다.
+    printf("%x\n", 0x1234abcd);
+
+    for (;;) {
+        __asm__ __volatile__("wfi");
+    }
+}
+```
+
+### 실행
+`./run.sh`을 실행하면 아래와 같이 출력된다.
+```
+console: 
+
+hello world!
+date: 2025 1 0
+PANIC: kernel.c:39 unexpected trap scause=00000002, stval=00000000, sepc=8020012e
+```
+
+출력된 정보를 보면 프로그램 카운터(`sepc`)가 `8020012e`로 되어있다. `llvm-objdump -d kernel.elf`를 사용해 프로그램에서 `8020012e` 주소의 명령을 살펴보면, 
+
+```shell
+$ llvm-objdump -d kernel.elf
+kernel.elf:     file format elf32-littleriscv
+
+Disassembly of section .text:
+
+80200000 <boot>:
+80200000: 37 05 22 80   lui     a0, 524832
+80200004: 13 05 c5 4a   addi    a0, a0, 1196
+...
+8020012e: 00 00         unimp   
+...
+```
+
+`unimp`이 호출된 지점임을 확인할 수 있다.

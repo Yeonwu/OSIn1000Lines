@@ -2,7 +2,6 @@
 // Created by ohye on 25. 1. 19.
 //
 #include "kernel.h"
-#include "common.h"
 
 typedef unsigned char uint8_t;
 typedef unsigned int uint32_t;
@@ -32,13 +31,108 @@ void putchar(char ch) {
     sbi_call(ch, 0, 0, 0, 0, 0, 0, 1);
 }
 
+void handle_trap(struct trap_frame* f) {
+    uint32_t scause = READ_CSR(scause);
+    uint32_t stval = READ_CSR(stval);
+    uint32_t user_pc = READ_CSR(sepc);
+
+    PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
+}
+
+__attribute__((naked))
+__attribute__((aligned(4)))
+void kernel_entry(void) {
+    __asm__ __volatile__(
+            "csrw sscratch, sp\n"       // 현재 스택 포인터 값 저장
+            "addi sp, sp, -4 * 31\n"    // 현재 스택 포인터 -= 4 * 31 (32바이트 크기의 스택 확보)
+
+            "sw ra,  4 * 0(sp)\n"       // 스택에 현재 레지스터 값 전부 저장
+            "sw gp,  4 * 1(sp)\n"
+            "sw tp,  4 * 2(sp)\n"
+            "sw t0,  4 * 3(sp)\n"
+            "sw t1,  4 * 4(sp)\n"
+            "sw t2,  4 * 5(sp)\n"
+            "sw t3,  4 * 6(sp)\n"
+            "sw t4,  4 * 7(sp)\n"
+            "sw t5,  4 * 8(sp)\n"
+            "sw t6,  4 * 9(sp)\n"
+            "sw a0,  4 * 10(sp)\n"
+            "sw a1,  4 * 11(sp)\n"
+            "sw a2,  4 * 12(sp)\n"
+            "sw a3,  4 * 13(sp)\n"
+            "sw a4,  4 * 14(sp)\n"
+            "sw a5,  4 * 15(sp)\n"
+            "sw a6,  4 * 16(sp)\n"
+            "sw a7,  4 * 17(sp)\n"
+            "sw s0,  4 * 18(sp)\n"
+            "sw s1,  4 * 19(sp)\n"
+            "sw s2,  4 * 20(sp)\n"
+            "sw s3,  4 * 21(sp)\n"
+            "sw s4,  4 * 22(sp)\n"
+            "sw s5,  4 * 23(sp)\n"
+            "sw s6,  4 * 24(sp)\n"
+            "sw s7,  4 * 25(sp)\n"
+            "sw s8,  4 * 26(sp)\n"
+            "sw s9,  4 * 27(sp)\n"
+            "sw s10, 4 * 28(sp)\n"
+            "sw s11, 4 * 29(sp)\n"
+
+            "csrr a0, sscratch\n"       // 저장해둔 스택 포인터 값을 다시 불러와서 스택에 저장
+            "sw a0, 4 * 30(sp)\n"
+
+            "mv a0, sp\n"               // a0 레지스터에 현재 스택 포인터값을 넣어 handle_trap 호출 시 인자로 넘겨준다.
+            // handle_trap 함수는 struct trap frame* 타입의 인자를 하나 받는다.
+            // 스택에 값들을 넣고 난 다음의 스택 포인터 주소를 넘겨주어 struct trap frame*로 사용한다.
+            "call handle_trap\n"        // handle_trap 함수 호출
+
+
+            "lw ra,  4 * 0(sp)\n"       // 스택에 넣어두었던 값을 다시 레지스터로 가져온다.
+            "lw gp,  4 * 1(sp)\n"
+            "lw tp,  4 * 2(sp)\n"
+            "lw t0,  4 * 3(sp)\n"
+            "lw t1,  4 * 4(sp)\n"
+            "lw t2,  4 * 5(sp)\n"
+            "lw t3,  4 * 6(sp)\n"
+            "lw t4,  4 * 7(sp)\n"
+            "lw t5,  4 * 8(sp)\n"
+            "lw t6,  4 * 9(sp)\n"
+            "lw a0,  4 * 10(sp)\n"
+            "lw a1,  4 * 11(sp)\n"
+            "lw a2,  4 * 12(sp)\n"
+            "lw a3,  4 * 13(sp)\n"
+            "lw a4,  4 * 14(sp)\n"
+            "lw a5,  4 * 15(sp)\n"
+            "lw a6,  4 * 16(sp)\n"
+            "lw a7,  4 * 17(sp)\n"
+            "lw s0,  4 * 18(sp)\n"
+            "lw s1,  4 * 19(sp)\n"
+            "lw s2,  4 * 20(sp)\n"
+            "lw s3,  4 * 21(sp)\n"
+            "lw s4,  4 * 22(sp)\n"
+            "lw s5,  4 * 23(sp)\n"
+            "lw s6,  4 * 24(sp)\n"
+            "lw s7,  4 * 25(sp)\n"
+            "lw s8,  4 * 26(sp)\n"
+            "lw s9,  4 * 27(sp)\n"
+            "lw s10, 4 * 28(sp)\n"
+            "lw s11, 4 * 29(sp)\n"
+            "lw sp, 4 * 30(sp)\n"
+
+            "sret\n"                  // kernel_entry가 호출되었던 지점으로 복귀
+            );
+}
+
 void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
 
+    WRITE_CSR(stvec, (uint32_t) kernel_entry);
+
     const char* s = "\n\nhello world!\n";
     printf("console: %s", s);
-    PANIC("AHHHHHH!");
     printf("date: %d %d %d\n", 2025, 1, 0);
+
+    __asm__ __volatile__("unimp");
+
     printf("%x\n", 0x1234abcd);
 
     for (;;) {
