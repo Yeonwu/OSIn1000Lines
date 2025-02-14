@@ -8,6 +8,7 @@ typedef unsigned int uint32_t;
 typedef uint32_t size_t;
 
 extern char __bss[], __bss_end[], __stack_top[];
+extern char __free_ram[], __free_ram_end[];
 
 struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4, long arg5, long fid, long eid) {
     register long a0 __asm__("a0") = arg0;
@@ -122,6 +123,22 @@ void kernel_entry(void) {
             );
 }
 
+paddr_t alloc_pages(uint32_t n) {
+    static paddr_t next_paddr = (paddr_t) __free_ram;
+
+    paddr_t curr_paddr = next_paddr;
+    next_paddr += (n * PAGE_SIZE);
+
+    if (next_paddr > (paddr_t) __free_ram_end) {
+        PANIC("out of memory: using %x, available: %x, tried to allocate %x.", \
+        curr_paddr, (paddr_t)__free_ram_end, next_paddr);
+    }
+
+    memset((void*) curr_paddr, 0, n * PAGE_SIZE);
+
+    return curr_paddr;
+}
+
 void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
 
@@ -131,7 +148,14 @@ void kernel_main(void) {
     printf("console: %s", s);
     printf("date: %d %d %d\n", 2025, 1, 0);
 
-    __asm__ __volatile__("unimp");
+    paddr_t paddr0 = alloc_pages(2);
+    paddr_t paddr1 = alloc_pages(1);
+    printf("alloc pages test: paddr0 = %x\n", paddr0);
+    printf("alloc pages test: paddr1 = %x\n", paddr1);
+
+    paddr_t paddr2 = alloc_pages(64 * 1024);
+
+    //__asm__ __volatile__("unimp");
 
     printf("%x\n", 0x1234abcd);
 
