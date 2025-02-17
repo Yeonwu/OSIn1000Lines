@@ -1153,3 +1153,289 @@ $ llvm-nm kernel.elf | grep __free_ram
 84221000 B __free_ram_end
 ```
 
+## 프로세스
+
+### 프로세스 제어 블록(PCB)
+
+프로세스 제어 블록(PCB)는 프로세스 ID(pid), 상태 등을 저장한다. `kernel.h`에 다음 구조체로 PCB를 정의한다.
+```c
+#define PROCS_MAX 8         // 프로세스 최대 개수
+
+#define PROC_UNUSED 0       // 프로세스 상태
+#define PROC_RUNNABLE 1
+
+struct process {
+    int pid;                // 프로세스 ID
+    int state;              // 프로세스 상태 
+    vaddr_t sp;             // 커널 스택 스택포인터
+    uint8_t stack[8192];    // 커널 스택
+};
+```
+
+프로세스는 커널 스택과 유저 스택을 갖는다. 유저 스택은 해당 프로세스가 사용하는 스택 영역으로 지역 변수, 함수 매개변수, 반환 값 등 일반적으로 스택이라 했을 때 저장하는 값이 들어있다. 커널 스택은 OS가 사용하는 스택 영역으로 커널 함수 내 변수, 시스템 호출 매개 변수, 커널 데이터 포인터, 인터럽트 시 레지스터 값 등을 저장한다. 
+
+각 프로세스마다 커널 스택을 갖는 설계도 있지만 반대로 싱글 커널 스택이라 불리는 구조도 있다. 각 프로세스/스레드마다 커널 스택을 갖는 대신, CPU 하나에 커널 스택 하나씩을 갖는 구조이다. 
+
+### 컨텍스트 스위칭
+`kernel.c` 파일안의 `context_switch`함수로 컨텍스트 스위칭을 구현한다.
+```c
+ // 컴파일러의 함수 안의 인라인 어셈블리 외의 코드 생성을 막는다. 
+__attribute__((naked))     
+// 현재 프로세스의 커널 스택 포인터와 실행할 프로세스의 커널 스택 포인터를 인자로 받는다.
+void switch_context(uint32_t *prev_sp, uint32_t *next_sp) {
+    __asm__ __volatile__ (
+            // 현재 커널 스택에 레지스터 값을 저장한다. 이때, caller-saved를 제외한 callee-saved 레지스터들만을 저장한다. caller-saved 레지스터는 함수를 호출한 쪽에서 저장할 책임이 있지만, callee-saved 레지스터는 호출된 함수가 책임이 있다. 호출된 함수가 리턴하기 전에 해당 레지스터들의 값을 호출되기 전과 같은 값으로 만들어야 한다.
+            "addi sp, sp, -4 * 13\n"
+            "sw  ra ,  0 * 4(sp)\n"
+            "sw  s0 ,  1 * 4(sp)\n"
+            "sw  s1 ,  2 * 4(sp)\n"
+            "sw  s2 ,  3 * 4(sp)\n"
+            "sw  s3 ,  4 * 4(sp)\n"
+            "sw  s4 ,  5 * 4(sp)\n"
+            "sw  s5 ,  6 * 4(sp)\n"
+            "sw  s6 ,  7 * 4(sp)\n"
+            "sw  s7 ,  8 * 4(sp)\n"
+            "sw  s8 ,  9 * 4(sp)\n"
+            "sw  s9 , 10 * 4(sp)\n"
+            "sw  s10, 11 * 4(sp)\n"
+            "sw  s11, 12 * 4(sp)\n"
+
+            // 현재 프로세스의 커널 스택 포인터 값을 업데이트 해준다.
+            "sw sp, (a0)\n"
+            // 실행할 프로세스의 커널 스택 포인터 값을 가져온다.
+            "lw sp, (a1)\n"
+            
+            // 실행한 프로세스의 커널 스택에 저장되어 있던 레지스터 값들을 불러온다.
+            "lw  ra ,  0 * 4(sp)\n"
+            "lw  s0 ,  1 * 4(sp)\n"
+            "lw  s1 ,  2 * 4(sp)\n"
+            "lw  s2 ,  3 * 4(sp)\n"
+            "lw  s3 ,  4 * 4(sp)\n"
+            "lw  s4 ,  5 * 4(sp)\n"
+            "lw  s5 ,  6 * 4(sp)\n"
+            "lw  s6 ,  7 * 4(sp)\n"
+            "lw  s7 ,  8 * 4(sp)\n"
+            "lw  s8 ,  9 * 4(sp)\n"
+            "lw  s9 , 10 * 4(sp)\n"
+            "lw  s10, 11 * 4(sp)\n"
+            "lw  s11, 12 * 4(sp)\n"
+            "addi sp, sp, 4 * 13\n"
+
+            "ret"
+            );
+}
+```
+
+다음으로, 프로세스를 생성 및 초기화하는 `create_process` 함수를 `kernel.c`에 작성한다. `create_process` 함수는 `procs` 배열에서 비어있는 프로세스 슬롯을 찾고 pid와 entry point를 설정하여 PCB 포인터를 반환한다.
+
+```c
+// entry_point는 함수 주소 값이다.
+struct process* create_process(uint32_t entry_point) {
+    uint8_t i;
+    struct process* proc = NULL;
+
+    for (i = 0; i < PROCS_MAX; i++) {
+        if (procs[i].state == PROC_UNUSED) {
+            proc = &procs[i];
+            break;
+        }
+    }
+
+    if (proc == NULL) PANIC("There is no unused process slot.");
+
+    uint32_t *sp = (uint32_t*) &proc->stack[sizeof(proc->stack)];
+    // 커널 스택에 레지스터 초기값들을 넣는다.
+    *--sp = 0; // s11;
+    *--sp = 0; // s10;
+    *--sp = 0; // s9;
+    *--sp = 0; // s8;
+    *--sp = 0; // s7;
+    *--sp = 0; // s6;
+    *--sp = 0; // s5;
+    *--sp = 0; // s4;
+    *--sp = 0; // s3;
+    *--sp = 0; // s2;
+    *--sp = 0; // s1;
+    *--sp = 0; // s0;
+    *--sp = entry_point; // ra - 리턴주소를 저장하는 레지스터이다. switch_context 함수의 마지막이 'ret' 명령어이므로, 해당 주소에 있는 함수를 실행하게 된다.
+
+    proc->pid = i;
+    proc->state = PROC_RUNNABLE;
+    proc->sp = (uint32_t) sp;
+
+    return proc;
+}
+```
+
+이제 프로세스 A와 B를 만들고 컨텍스트 스위칭을 테스트해보자. `kernel.c`에 아래와 같은 코드를 작성하고 실행한다.
+
+```c
+// 출력이 너무 빠르게 일어나는 것을 방지하기 위한 함수이다.
+void delay() {
+    for (int i = 0; i < 30000000; i++) {
+        // 컴파일러 최적화로 인해 반복문이 생략되는 것을 막기 위함.
+        __asm__ ("nop");
+    }
+}
+
+struct process *proc_a;
+struct process *proc_b;
+
+void proc_a_entry() {
+    printf("start process a\n");
+    while(1) {
+        printf("pid %d A\n", proc_a->pid);
+        delay();
+        switch_context(&proc_a->sp, &proc_b->sp);
+    }
+}
+
+void proc_b_entry() {
+    printf("start process b\n");
+    while(1) {
+        printf("pid %d B\n", proc_b->pid);
+        delay();
+        switch_context(&proc_b->sp, &proc_a->sp);
+    }
+}
+
+...
+
+void kernel_main(void) {
+    memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
+
+    WRITE_CSR(stvec, (uint32_t) kernel_entry);
+
+    proc_a = create_process((uint32_t) proc_a_entry);
+    proc_b = create_process((uint32_t) proc_b_entry);
+
+    proc_a_entry();
+
+    PANIC("never executed.");
+}
+```
+
+```shell
+$ ./run.sh
+
+...
+# 아래와 같은 출력이 계속해서 이어진다면 성공이다.
+start process a
+pid 0 A
+start process b
+pid 1 B
+pid 0 A
+pid 1 B
+pid 0 A
+pid 1 B
+...
+```
+
+### 스케줄러
+
+매번 프로세스에서 전환할 프로세스를 일일히 지정해주어야 한다면 복잡하고 버그 발생 확률이 높아진다. 따라서 다음에 실행할 프로세스를 결정해주는 커널 프로그램인 스케줄러가 필요하다. `kernel.c` 파일에 작성한 다음 `yield` 함수로 간단한 비선점형 스케줄러를 구현할 수 있다.
+
+```c
+// 현재 실행되고 있는 프로세스
+struct process *current_proc;
+// 유휴 프로세스 - 아무런 프로세스도 실행되고 있지 않을 때 해당 프로세스를 실행한다.
+struct process *idle_proc;
+
+// yield 함수를 호출하면 실행 가능한 다른 프로세스를 찾아 실행한다.
+void yield() {
+    struct process *next_proc = idle_proc;
+    for (int i = 1; i <= PROCS_MAX; i++) {
+        // 현재 실행 중인 프로세스 다음 프로세스부터 한 바퀴를 쭉 돌면서 실행 가능한 프로세스를 찾는다.
+        struct process *proc = &procs[(current_proc->pid + i) % PROCS_MAX];
+        if (proc->state == PROC_RUNNABLE && proc->pid > 0) {
+            next_proc = proc;
+            break;
+        }
+    }
+
+    // 다른 실행가능한 프로세스가 없다면 컨텍스트 스위칭을 하지 않고 실행중이던 프로세스를 계속 실행한다.
+    if (next_proc == current_proc) return;
+
+    // sscratch 레지스터에 커널스택 시작 주소를 저장한다. 이유는 아래에서 설명.
+    WRITE_CSR(sscratch, (uint32_t) &next_proc->stack[sizeof(next_proc->stack)]);
+
+    // 현재 실행중인 프로세스 정보를 바꾸고 다음 프로세스를 실행한다.
+    struct process* prev_proc = current_proc;
+    current_proc = next_proc;
+    switch_context(&prev_proc->sp, &next_proc->sp);
+}
+```
+
+`kernel_main`, `proc_a_entry`, `proc_b_entry`도 다음과 같이 변경한다.
+
+```c
+void proc_a_entry() {
+    printf("start process a\n");
+    while(1) {
+        printf("pid %d A\n", proc_a->pid);
+        delay();
+        yield(); // 직접 다음 프로세스를 진행하는 대신 yield 호출
+    }
+} // proc_b_entry도 똑같이 전환
+
+void kernel_main(void) {
+    memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
+
+    WRITE_CSR(stvec, (uint32_t) kernel_entry);
+
+    // idle 프로세스 생성 및 초기화
+    idle_proc = create_process((uint32_t) NULL);
+    idle_proc->pid = -1;
+    current_proc = idle_proc;
+
+    proc_a = create_process((uint32_t) proc_a_entry);
+    proc_b = create_process((uint32_t) proc_b_entry);
+
+    // idle 프로세스에서 다른 프로세스로 전환
+    yield();
+
+    PANIC("switched to idle process");
+}
+```
+
+실행하면 이전과 똑같이 프로세스 간에 컨텍스트 스위칭이 잘 동작한다.
+
+### 예외 핸들러 수정
+
+예외 핸들러를 다음과 같이 수정해야한다. 이전에는 스택에 바로 레지스터 값을 저장하고 불러왔지만, 이제는 `yield` 함수 호출 시 `sscratch` 레지스터에 저장해둔 커널 스택 주소값을 가져와 해당 커널 스택에 레지스터를 저장하고 불러온다.
+
+```c
+__attribute__((naked))
+__attribute__((aligned(4)))
+void kernel_entry(void) {
+    __asm__ __volatile__(
+            "csrrw sp, sscratch, sp\n"  // 현재 스택포인터 값을 sscratch에 저장하고 sscratch에 저장된 커널스택 스택포인터 값을 가져온다.
+            "addi sp, sp, -4 * 31\n"    // 현재 스택 포인터 -= 4 * 31 (32바이트 크기의 스택 확보)
+
+            "sw ra,  4 * 0(sp)\n"       // 스택에 현재 레지스터 값 전부 저장
+            "sw gp,  4 * 1(sp)\n"
+            // ...
+            "sw s11, 4 * 29(sp)\n"
+
+            "csrr a0, sscratch\n"       // 저장해둔 스택 포인터 값을 다시 불러와서 스택에 저장
+            "sw a0, 4 * 30(sp)\n"
+
+            "addi a0, sp, 4 * 31\n"     // 커널 스택 값을 다시 복원해서 sscratch에 저장
+            "csrw sscratch, a0\n"
+
+            "mv a0, sp\n"               // a0 레지스터에 현재 스택 포인터값을 넣어 handle_trap 호출 시 인자로 넘겨준다.
+            "call handle_trap\n"        // handle_trap 함수 호출
+
+
+            "lw ra,  4 * 0(sp)\n"       // 스택에 넣어두었던 값을 다시 레지스터로 가져온다.
+            "lw gp,  4 * 1(sp)\n"
+            //...
+            "lw sp, 4 * 30(sp)\n"
+
+            "sret\n"                  // kernel_entry가 호출되었던 지점으로 복귀
+            );
+}
+```
+
+이와 같이 구현한 이유는 실행 중인 프로세스가 유저 모드에서 오류가 발생했을 때 무한 루프를 막기 위해서이다. 유저 모드에서 스택 오버플로우 등으로 스택 포인터 값이 유효하지 않은 주소를 갖게되는 상황을 가정해보자. 이 때 스택 포인터 레지스터를 그대로 사용하게 되면 유효하지 않은 주소에 접근하게 되어 또다시 인터럽트가 발생하고, 에러 핸들러가 호출되어 무한 루프에 빠지게 된다. 유저 모드에서는 커널 스택이 아닌 유저 스택을 사용하고 있기 때문에 유저 모드에서 오류가 나더라도 커널 스택에는 영향이 없다. 따라서 유효한 주소임이 보장된 커널 스택 시작 주소 값에 레지스터를 저장하고, 불러오는 것이다.
+

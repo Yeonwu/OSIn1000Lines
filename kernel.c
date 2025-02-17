@@ -44,7 +44,7 @@ __attribute__((naked))
 __attribute__((aligned(4)))
 void kernel_entry(void) {
     __asm__ __volatile__(
-            "csrw sscratch, sp\n"       // 현재 스택 포인터 값 저장
+            "csrrw sp, sscratch, sp\n"  // 현재 스택포인터 값을 sscratch에 저장하고 sscratch에 저장된 커널스택 스택포인터 값을 가져온다.
             "addi sp, sp, -4 * 31\n"    // 현재 스택 포인터 -= 4 * 31 (32바이트 크기의 스택 확보)
 
             "sw ra,  4 * 0(sp)\n"       // 스택에 현재 레지스터 값 전부 저장
@@ -80,6 +80,9 @@ void kernel_entry(void) {
 
             "csrr a0, sscratch\n"       // 저장해둔 스택 포인터 값을 다시 불러와서 스택에 저장
             "sw a0, 4 * 30(sp)\n"
+
+            "addi a0, sp, 4 * 31\n"     // 커널 스택 값을 다시 복원해서 sscratch에 저장
+            "csrw sscratch, a0\n"
 
             "mv a0, sp\n"               // a0 레지스터에 현재 스택 포인터값을 넣어 handle_trap 호출 시 인자로 넘겨준다.
             // handle_trap 함수는 struct trap frame* 타입의 인자를 하나 받는다.
@@ -139,29 +142,148 @@ paddr_t alloc_pages(uint32_t n) {
     return curr_paddr;
 }
 
+__attribute__((naked))
+void switch_context(uint32_t *prev_sp, uint32_t *next_sp) {
+    __asm__ __volatile__ (
+            "addi sp, sp, -4 * 13\n"
+            "sw  ra ,  0 * 4(sp)\n"
+            "sw  s0 ,  1 * 4(sp)\n"
+            "sw  s1 ,  2 * 4(sp)\n"
+            "sw  s2 ,  3 * 4(sp)\n"
+            "sw  s3 ,  4 * 4(sp)\n"
+            "sw  s4 ,  5 * 4(sp)\n"
+            "sw  s5 ,  6 * 4(sp)\n"
+            "sw  s6 ,  7 * 4(sp)\n"
+            "sw  s7 ,  8 * 4(sp)\n"
+            "sw  s8 ,  9 * 4(sp)\n"
+            "sw  s9 , 10 * 4(sp)\n"
+            "sw  s10, 11 * 4(sp)\n"
+            "sw  s11, 12 * 4(sp)\n"
+
+            "sw sp, (a0)\n"
+            "lw sp, (a1)\n"
+
+            "lw  ra ,  0 * 4(sp)\n"
+            "lw  s0 ,  1 * 4(sp)\n"
+            "lw  s1 ,  2 * 4(sp)\n"
+            "lw  s2 ,  3 * 4(sp)\n"
+            "lw  s3 ,  4 * 4(sp)\n"
+            "lw  s4 ,  5 * 4(sp)\n"
+            "lw  s5 ,  6 * 4(sp)\n"
+            "lw  s6 ,  7 * 4(sp)\n"
+            "lw  s7 ,  8 * 4(sp)\n"
+            "lw  s8 ,  9 * 4(sp)\n"
+            "lw  s9 , 10 * 4(sp)\n"
+            "lw  s10, 11 * 4(sp)\n"
+            "lw  s11, 12 * 4(sp)\n"
+            "addi sp, sp, 4 * 13\n"
+
+            "ret"
+            );
+}
+
+struct process procs[PROCS_MAX];
+
+struct process* create_process(uint32_t entry_point) {
+    uint8_t i;
+    struct process* proc = NULL;
+
+    for (i = 0; i < PROCS_MAX; i++) {
+        if (procs[i].state == PROC_UNUSED) {
+            proc = &procs[i];
+            break;
+        }
+    }
+
+    if (proc == NULL) PANIC("There is no unused process slot.");
+
+    uint32_t *sp = (uint32_t*) &proc->stack[sizeof(proc->stack)];
+
+    *--sp = 0; // s11;
+    *--sp = 0; // s10;
+    *--sp = 0; // s9;
+    *--sp = 0; // s8;
+    *--sp = 0; // s7;
+    *--sp = 0; // s6;
+    *--sp = 0; // s5;
+    *--sp = 0; // s4;
+    *--sp = 0; // s3;
+    *--sp = 0; // s2;
+    *--sp = 0; // s1;
+    *--sp = 0; // s0;
+    *--sp = entry_point; // ra;
+
+    proc->pid = i;
+    proc->state = PROC_RUNNABLE;
+    proc->sp = (uint32_t) sp;
+
+    return proc;
+}
+
+struct process *current_proc;
+struct process *idle_proc;
+
+void yield() {
+    struct process *next_proc = idle_proc;
+    for (int i = 1; i <= PROCS_MAX; i++) {
+        struct process *proc = &procs[(current_proc->pid + i) % PROCS_MAX];
+        if (proc->state == PROC_RUNNABLE && proc->pid > 0) {
+            next_proc = proc;
+            break;
+        }
+    }
+
+    if (next_proc == current_proc) return;
+
+    WRITE_CSR(sscratch, (uint32_t) &next_proc->stack[sizeof(next_proc->stack)]);
+
+    struct process* prev_proc = current_proc;
+    current_proc = next_proc;
+    switch_context(&prev_proc->sp, &next_proc->sp);
+}
+
+void delay() {
+    for (int i = 0; i < 30000000; i++) {
+        __asm__ ("nop");
+    }
+}
+
+struct process *proc_a;
+struct process *proc_b;
+
+void proc_a_entry() {
+    printf("start process a\n");
+    while(1) {
+        printf("pid %d A\n", proc_a->pid);
+        delay();
+        yield();
+    }
+}
+
+void proc_b_entry() {
+    printf("start process b\n");
+    while(1) {
+        printf("pid %d B\n", proc_b->pid);
+        delay();
+        yield();
+    }
+}
+
 void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
 
     WRITE_CSR(stvec, (uint32_t) kernel_entry);
 
-    const char* s = "\n\nhello world!\n";
-    printf("console: %s", s);
-    printf("date: %d %d %d\n", 2025, 1, 0);
+    idle_proc = create_process((uint32_t) NULL);
+    idle_proc->pid = -1;
+    current_proc = idle_proc;
 
-    paddr_t paddr0 = alloc_pages(2);
-    paddr_t paddr1 = alloc_pages(1);
-    printf("alloc pages test: paddr0 = %x\n", paddr0);
-    printf("alloc pages test: paddr1 = %x\n", paddr1);
+    proc_a = create_process((uint32_t) proc_a_entry);
+    proc_b = create_process((uint32_t) proc_b_entry);
 
-    paddr_t paddr2 = alloc_pages(64 * 1024);
+    yield();
 
-    //__asm__ __volatile__("unimp");
-
-    printf("%x\n", 0x1234abcd);
-
-    for (;;) {
-        __asm__ __volatile__("wfi");
-    }
+    PANIC("switched to idle process");
 }
 
 __attribute__((section(".text.boot")))
