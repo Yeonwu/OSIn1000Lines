@@ -7,6 +7,7 @@ typedef unsigned char uint8_t;
 typedef unsigned int uint32_t;
 typedef uint32_t size_t;
 
+extern char __kernel_base[];
 extern char __bss[], __bss_end[], __stack_top[];
 extern char __free_ram[], __free_ram_end[];
 
@@ -142,6 +143,24 @@ paddr_t alloc_pages(uint32_t n) {
     return curr_paddr;
 }
 
+void map_page(uint32_t* table1, vaddr_t vaddr, paddr_t paddr, uint32_t flags) {
+    if (!is_aligned(vaddr, PAGE_SIZE))
+        PANIC("unaligned vaddr %x\n", vaddr);
+
+    if (!is_aligned(paddr, PAGE_SIZE))
+        PANIC("unaligned paddr %x\n", paddr);
+
+    uint32_t vpn1 = (vaddr >> 22) & 0x3FF;
+    if ((table1[vpn1] & PAGE_V) == 0) {
+        paddr_t table2_page_addr = alloc_pages(1);
+        table1[vpn1] = ((table2_page_addr / PAGE_SIZE) << 10) | PAGE_V;
+    }
+
+    uint32_t vpn2 = (vaddr >> 12) & 0x3FF;
+    paddr_t* table2 = (paddr_t*) ((table1[vpn1] >> 10) * PAGE_SIZE);
+    table2[vpn2] = ((paddr / PAGE_SIZE) << 10) | PAGE_V | flags;
+}
+
 __attribute__((naked))
 void switch_context(uint32_t *prev_sp, uint32_t *next_sp) {
     __asm__ __volatile__ (
@@ -213,9 +232,24 @@ struct process* create_process(uint32_t entry_point) {
     *--sp = 0; // s0;
     *--sp = entry_point; // ra;
 
+    paddr_t page_table = alloc_pages(1);
+    for (
+            paddr_t addr = (paddr_t)__kernel_base;
+            addr < (paddr_t)__free_ram_end;
+            addr += PAGE_SIZE
+        ) {
+        map_page(
+            (uint32_t *)page_table,
+            addr,
+            addr,
+            PAGE_R | PAGE_W | PAGE_X
+            );
+    }
+
     proc->pid = i;
     proc->state = PROC_RUNNABLE;
     proc->sp = (uint32_t) sp;
+    proc->page_table = page_table;
 
     return proc;
 }
@@ -234,6 +268,10 @@ void yield() {
     }
 
     if (next_proc == current_proc) return;
+
+    __asm__ __volatile__ ("sfence.vma");
+    WRITE_CSR(satp, (SATP_SV32 | ((uint32_t) next_proc->page_table / PAGE_SIZE)));
+    __asm__ __volatile__ ("sfence.vma");
 
     WRITE_CSR(sscratch, (uint32_t) &next_proc->stack[sizeof(next_proc->stack)]);
 
