@@ -1635,3 +1635,190 @@ vaddr    paddr            size     attr
 
 커널 메모리 영역 시작점인 `0x80200000`부터 매핑이 시작되어 논리주소와 물리주소가 일치하게 매핑되어있음을 확인할 수 있다.
 
+### 어플리케이션
+
+커널에서 실행할 어플리케이션을 만들기 위한 몇가지 준비를 해야한다.
+
+#### 메모리 레이아웃
+
+어플리케이션 메모리 레이아웃은 다음과 같다. 커널 메모리 레이아웃과 유사하지만, 메모리 시작지점, 크기 제한 등의 차이점이 있다.
+```linkerscript
+ENTRY(start)
+
+SECTIONS {
+    /* 메모리 시작지점은 0x1000000이다. 커널 메모리 시작점은 0x80200000로, 0x7f200000(약 2GB)만큼의 차이를 벌려 커널의 메모리 주소를 침범하지 않도록 한다. */
+    . = 0x1000000;
+
+    /* machine code */
+    .text :{
+        KEEP(*(.text.start));
+        *(.text .text.*);
+    }
+
+    /* read-only data */
+    .rodata : ALIGN(4) {
+        *(.rodata .rodata.*);
+    }
+
+    /* 초기화 값이 있는 데이터 */
+    .data : ALIGN(4) {
+        *(.data .data.*);
+    }
+
+    /* 시작 시 0으로 초기화 필요한 데이터 */
+    .bss : ALIGN(4) {
+        *(.bss .bss.* .sbss .sbss.*);
+
+        . = ALIGN(16);
+        . += 64 * 1024; /* 64KB */
+
+        __stack_top = .;
+        
+        /* 실행파일 크기가 너무 커지는 것을 방지한다. */
+        ASSERT(. < 0x1800000, "too large executable");
+    }
+}
+```
+
+#### 유저 라이브러리
+
+다음으로, 유저 어플리케이션을 위한 간단한 라이브러리를 만들자. 우선 어플리케이션 시작을 위한 기능한 간단하게 구현한다.
+
+```c
+// user.h
+#include "common.h"
+
+__attribute__((noreturn))void exit(void);
+void putchar(char ch);
+
+// user.c
+#include "user.h"
+
+extern char __stack_top[];
+
+// 어플리케이션 종료 시 호출하는 함수. 우선 무한루프롤 돌게 만들어 놓는다. 
+__attribute__((noreturn))
+void exit(void) {
+    for (;;);
+}
+
+void putchar(char ch) { 
+    // 이후 구현
+}
+
+// 어플리케이션 엔트리 함수. 
+// bss 영역을 0으로 초기화하기 않는 이유는 커널에서 페이지를 할당받을 때 초기화가 보장되기 때문이다.
+__attribute__((section(".text.start")))
+__attribute__((naked))
+void start(void) {
+    __asm__ __volatile__(
+            "mv sp, %[stack_top]\n"
+            "call main          \n"
+            "call exit          \n"
+            :
+            : [stack_top] "r" (__stack_top)
+            );
+}
+```
+
+#### 첫 어플리케이션
+지금은 어플리케이션이 문자를 출력할 방법이 없기 때문에 `shell.c`에 무한루프를 도는 프로그램을 간단히 작성하자.
+
+```c
+// shell.c
+#include "user.h"
+
+void main(void) {
+    for(;;);
+}
+```
+
+#### 어플리케이션 빌드
+
+어플리케이션은 커널과 별개로 빌드해야 한다. `run.sh`에 다음 내용을 추가하자.
+```shell
+OBJCOPY=llvm-objcopy
+
+# 쉘 빌드 (어플리케이션)
+# 커널과 비슷하게 빌드하여 .elf 파일을 얻는다.
+$CC $CFLAGS -Wl,-Tuser.ld -Wl,-Map=shell.map -o shell.elf shell.c user.c common.c
+# .elf 파일을 바이너리로 바꾼다. 바이너리는 실제 메모리에 올라갈 내용이므로 OS가 바이너리를 메모리에 복사하기만 하면 실행할 준비를 끝낼 수 있다. 일반적인 OS는 .elf와 같이 메모리 내용과 메모리 맵이 따로 저장된 형식을 사용한다.
+$OBJCOPY --set-section-flags .bss=alloc,contents -O binary shell.elf shell.bin
+# 추출한 바이너리는 c에 임베딩할 수 있는 형식으로 변환한다.
+$OBJCOPY -Ibinary -Oelf32-littleriscv shell.bin shell.bin.o
+
+
+# 커널 빌드
+# 커널 빌드 시 어플리케이션 바이너리 파일을 포함시킨다.
+$CC $CFLAGS -Wl,-Tkernel.ld -Wl,-Map=kernel.map -o kernel.elf \
+  kernel.c common.c shell.bin.o
+```
+
+어플리케이션 빌드의 결과물로 얻은 `shell.bin.o` 파일의 내용을 확인해보자. 
+```shell
+$ llvm-nm shell.bin.o
+
+00010310 D _binary_shell_bin_end
+00010310 A _binary_shell_bin_size
+00000000 D _binary_shell_bin_start
+```
+
+`_binary` 접두사가 이후에 파일명이 따라오고, `start`, `end`, `size` 3개의 변수가 있다. 이 심볼들은 실행파일의 시작, 끝, 크기를 나타내는데, c에서 아래와 같이 사용할 수 있다.
+
+```c
+extern char _binary_shell_bin_start[];
+extern char _binary_shell_bin_size[];
+
+void main(void) {
+    uint8_t* shell_bin = (uint8_t*) _binary_shell_bin_start;
+    printf("shell_bin_size=%d\n", _binary_shell_bin_size);
+    printf("shell_bin[0]=%x\n", shell_bin[0]);
+}
+```
+
+위 코드는 실행파일의 크기와 첫 바이트를 출력한다. 예시에서 알 수 있듯, `start` 변수가 실행파일을 담고 있는 것처럼 사용할 수 있다.
+```c
+char _binary_shell_bin_start[] = "<shell.bin contents here>";
+```
+
+`size` 변수는 조금 특이하게 사용된다. `llvm-nm`으로 다시 한번 확인해보자. `llvm-nm` 출력의 1열은 해당 심볼의 주소인데, `size`변수 주소와 `shell.bin` 파일 크기가 같다. 두번째로 주목할 것은 2열인데, `A`는 해당 심볼이 a 타입(absolute)이라는 뜻으로 링커가 해당 심볼의 주소를 변경할 수 없게 된다. `size`변수를 `char size[]`와 같이 선언하였기 때문에 `size` 변수는 해당 심볼의 주소를 담은 포인터로 처리된다. 그런데 해당 주소와 파일의 크기가 같기 때문에 주소를 int 타입으로 캐스팅하여 파일의 크기로 사용할 수 있는 것이다. 
+
+```shell
+$ llvm-nm shell.bin.o | grep size
+00010310 A _binary_shell_bin_size
+
+$ ls -al shell.bin # shell.bin.o가 아니라 shell.bin이다.
+-rwxr-xr-x. 1 ohye ohye 66320 Mar  4 16:41 shell.bin
+
+$ python3 -c 'print(0x10310)'
+66320
+```
+
+### 실행파일 확인
+
+`llvm-objdump`를 사용해 실행파일을 확인해보면 .text.start 섹션이 메모리 레이아웃 시작점인 0x1000000에 위치함을 볼 수 있다.
+
+```shell
+$ llvm-objdump -d shell.elf
+
+shell.elf:      file format elf32-littleriscv
+
+Disassembly of section .text:
+
+01000000 <start>:
+ 1000000: 37 05 01 01   lui     a0, 4112
+ 1000004: 13 05 05 31   addi    a0, a0, 784
+ 1000008: 2a 81         mv      sp, a0
+ 100000a: 19 20         jal     0x1000010 <main>
+ 100000c: 21 20         jal     0x1000014 <exit>
+ 100000e: 00 00         unimp   
+
+01000010 <main>:
+ 1000010: 01 a0         j       0x1000010 <main>
+ 1000012: 00 00         unimp   
+
+01000014 <exit>:
+ 1000014: 01 a0         j       0x1000014 <exit>
+
+# 생략 
+```
