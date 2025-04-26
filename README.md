@@ -1822,3 +1822,433 @@ Disassembly of section .text:
 
 # 생략 
 ```
+
+### 유저 모드
+
+#### 실행파일 추출
+이전 챕터에서 만든 어플리케이션을 유저 모드에서 실행하기 위해서는 실행 파일을 추출해야한다. 어플리케이션 바이너리 시작 주소와 크기를 알고 있으므로 유저모드 페이지를 만들고 페이지 테이블에 매핑한다. 먼저 바이너리 시작 주소와 크기를 가져오자.
+
+```c
+// kernel.h
+
+// user.ld에 정의된 바이너리 시작 주소와 같은 값이어야 한다.
+// 이후 페이지 테이블에 매핑 시 이 주소부터 매핑하게 된다.
+#define USER_BASE 0x1000000
+
+// kernel.c
+
+// 바이너리 시작 주소, 크기를 가져온다. 해당 바이너리는 커널과 같이 컴파일 되었다.
+extern char _binary_shell_bin_start[], _binary_shell_bin_size[];
+
+void user_entry(void) {
+    PANIC("Not Implemented Yet");
+}
+
+// 엔트리 함수 주소 대신 바이너리 이미지 주소와 이미지 사이즈를 받는다.
+struct process* create_process(const void *image, size_t image_size) {
+    // 생략
+    *--sp = 0; // s4;
+    *--sp = 0; // s3;
+    *--sp = 0; // s2;
+    *--sp = 0; // s1;
+    *--sp = 0; // s0;
+    // return address에 엔트리 함수 주소 대신 user_entry 함수를 넣어준다.
+    *--sp = (uint32_t) user_entry; // ra;
+    
+    
+    // 생략
+
+    // 바이너리 이미지를 새로운 페이지에 복사하고 페이지 테이블에 매핑한다.
+    // 바이너리 이미지 원본 주소를 바로 매핑하면 안된다. 같은 프로세스를 여러개 실행할 경우 메모리 주소가 겹치기 때문이다.
+    for (uint32_t offset = 0; offset < image_size; offset += PAGE_SIZE) {
+        paddr_t page = alloc_pages(1);
+        
+        // 남은 바이너리 크기가 페이지 크기보다 작을 경우 예외처리해야한다.
+        // 무조건 4KB를 복사할 경우 뒤의 쓰레기 값이 복사된다.
+        size_t remaining = image_size - offset;
+        size_t copy_size = PAGE_SIZE <= remaining ? PAGE_SIZE : remaining;
+        
+        memcpy((void *)page, image + offset, copy_size);
+        map_page(
+            (uint32_t *)page_table,
+            USER_BASE + offset,
+            page,
+            // 유저 모드 비트를 활성화해야한다.
+            PAGE_U | PAGE_R | PAGE_W | PAGE_X
+            );
+    }
+    // 생략
+}
+
+void kernel_main(void) {
+    memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
+
+    WRITE_CSR(stvec, (uint32_t) kernel_entry);
+    
+    // 변경된 인자에 맞춰 바꿔준다.
+    idle_proc = create_process(NULL, 0);
+    idle_proc->pid = -1;
+    current_proc = idle_proc;
+    
+    // 어플리케이션 바이너리 주소를 넣어준다.
+    create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);
+    
+    // idle process -> application process
+    yield();
+    
+    PANIC("switched to idle process");
+}
+
+```
+
+실행하고 QEMU 모니터를 통해 페이지 테이블이 원하는데로 생성되었는지 확인해보자.
+
+```shell
+
+(qemu) info mem
+vaddr    paddr            size     attr
+-------- ---------------- -------- -------
+01000000 0000000080265000 00001000 rwxu-a-
+01001000 0000000080267000 00010000 rwxu---
+80200000 0000000080200000 00001000 rwx--a-
+80201000 0000000080201000 0000f000 rwx----
+
+```
+
+`USER_BASE` 주소인 `0x1000000`이 `0x80265000`으로 매핑되었다. attr은 `rwxu-a-`로, `u`가 포함되어 유저 모드 페이지로 생성되었음을 확인할 수 있다.
+
+#### 유저모드 전환
+
+어플리케이션을 실행하기 위해서는 유저 모드를 사용해야한다.
+
+```c
+// kernel.h
+
+// 유저모드 전환 시 하드웨어 인터럽트 활성화를 위한 비트이다. 
+// 여기서 하드웨어 인터럽트를 사용하지는 않는다.
+#define SSTATUS_SPIE (1<<5)
+
+//kernel.c
+__attribute__((naked))
+void user_entry(void) {
+    __asm__ __volatile__(
+        // sepc(program counter) 레지스터 값을 어플리케이션 바이너리 시작 지점으로 설정한다.
+        "csrw sepc, %[sepc]     \n"
+        // 하드웨어 인터럽트를 활성화한다.
+        "csrw sstatus, %[sstatus]   \n"
+        // sret을 호출해 유저 모드로 전환한다.
+        "sret"
+        :
+        : [sepc] "r" (USER_BASE),
+        [sstatus] "r" (SSTATUS_SPIE)
+        );
+}
+```
+
+`sret` 명령어는 `sstatus` 레지스터 값에 따라 다른 동작을 한다. `sstatus`의 `SPP` 비트에 따라 해당하는 모드로 전환하게 되는데, 여기서 `SPP` 비트는 0, 즉 유저 모드로 설정되어 있다.
+
+#### 유저모드 테스트
+
+실행해보면 프로그램 카운터가 `0x01000010`으로 `shell.c`의 무한 루프 부분을 잘 실행하고 있는 것을 확인할 수 있다.
+
+```shell
+(qemu) info registers
+
+CPU#0
+ V      =   0
+ pc       01000010
+```
+
+유저모드임을 확인하기 위해 허용되지 않은 페이지, 즉 커널 영역 페이지에 속하는 주소 접근을 시도해보자. 아래와 같이 작성하고 실행해보면 
+
+```c
+// shell.c
+
+void main(void) {
+    *((volatile int*) 0x80200000) = 0x1234;
+    
+    for(;;);
+}
+```
+
+```shell
+PANIC: kernel.c:42 unexpected trap scause=0000000f, stval=80200000, sepc=0100001a
+```
+`scause` 15는 page fault로, 허용되지 않은 메모리 접근을 시도하여 트랩이 발생했음을 확인할 수 있다.
+
+### 시스템 콜
+
+어플리케이션이 커널 기능을 사용할 수 있도록 시스템 콜을 구현하자. 이전에 커널에서 SBI콜을 구현한 것과 비슷하다.
+
+```c
+// user.c
+
+int syscall(int sysno, int arg0, int arg1, int arg2) {
+    register int a0 __asm__("a0") = arg0;
+    register int a1 __asm__("a1") = arg1;
+    register int a2 __asm__("a2") = arg2;
+    register int a3 __asm__("a3") = sysno;
+
+    // a3 레지스터에 시스템 콜 종류를,
+    // 나머지 레지스터에 시스템 콜 인자를 저장하고 ecall을 호출한다.
+    // ecall은 어플리케이션에서 커널로 이동하는 특수한 명령어로, 설정된 trap handler를 호출한다.
+    __asm__ __volatile__ (
+            "ecall"
+            : "=r"(a0)
+            : "r"(a0), "r"(a1), "r"(a2), "r"(a3)
+            : "memory"
+            );
+    
+    // 시스템콜이 끝난 다음 리턴값은 a0 레지스터에 담겨있다.
+    return a0;
+}
+
+void putchar(char ch) {
+    // 시스템 콜 종류는 PUTCHAR이고, 인자로 출력할 문자열 1개를 넘겨주고 있다.
+    syscall(SYS_PUTCHAR, ch, 0, 0);
+}
+```
+
+어플리케이션에서 시스템 콜을 호출했다면 커널에서 받아서 처리해주어야 한다.
+
+```c
+// kernel.c
+
+void handle_trap(struct trap_frame* f) {
+    uint32_t scause = READ_CSR(scause);
+    uint32_t stval = READ_CSR(stval);
+    uint32_t user_pc = READ_CSR(sepc);
+    
+    // 먼저 ecall로 인해 트랩이 발생했을 때 시스템 콜 핸들러를 호출해준다.
+    if (scause == SCAUE_ECALL) {
+        handle_syscall(f);
+        // 프로그램 카운터를 다음 명령어로 옮겨준다.
+        // 만약 옮기지 않으면 
+        // 프로그램 카운터가 해당 위치를 가르키고 있기 때문에 계속해서 ecall이 호출된다.
+        user_pc += 4;
+    } else {
+        PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
+    }
+    
+    // 변경된 프로그램 카운터를 레지스터에 저장하는 것도 잊지 말자.
+    WRITE_CSR(sepc, user_pc);
+}
+
+void handle_syscall(struct trap_frame* f) {
+    // trap frame에서 a3 레지스터, 즉 시스템 콜 종류를 기준으로 처리한다.
+    switch (f->a3) {
+        case SYS_PUTCHAR:
+            // PUTCHAR 시스템 콜이 호출되었다면 커널 영역에 정의된 putchar 함수를 실행한다.
+            // 이때 인자는 a0 레지스터에 들어있응 문자값을 사용한다.
+            putchar(f->a0);
+            break;
+        default:
+            // 정의되지 않은 시스템 콜이 호출되면 패닉을 일으킨다.
+            PANIC("unexpected syscall a3=%x\n", f->a3);
+    }
+}
+```
+
+이제 유저 쪽에서도 putchar가 구현되었으니 common.c에 있는 printf를 어플리케이션에서도 사용할 수 있다.
+
+```c
+// shell.c
+
+void main(void) {
+    printf("Hello world!");
+}
+```
+
+#### 키보드 입력 받기
+
+목표가 쉘 구현이므로 키보드 입력을 받아올 방법이 필요하다. 먼저 커널에서 SBI콜로 키보드 입력을 받아온 다음, PUTCHAR 시스템 콜과 똑같은 방식으로 구현해주자.
+
+```c
+// kernel.c
+long getchar(void) {
+    // SBI 시스템 콜로 디버그 콘솔 입력값을 가져오는 방법이다.
+    // 만약 입력이 없다면 -1을 리턴한다.
+    struct sbiret ret = sbi_call(0, 0, 0, 0, 0, 0, 0, 2);
+    return ret.error;
+}
+```
+
+다음으로 `handle_syscall`에 GETCHAR 처리를 구현하자.
+
+```c
+// common.h
+#define SYS_GETCHAR 2
+
+// user.c
+int getchar(void) {
+    return syscall(SYS_GETCHAR, 0, 0, 0);
+}
+
+// kernel.c
+void handle_syscall(struct trap_frame* f) {
+    switch (f->a3) {
+        // 생략
+        case SYS_GETCHAR:
+            // 입력이 들어올 때까지 루프를 돌면서 확인한다.
+            while(1) {
+                long ch = getchar();
+                if (ch >= 0) {
+                    f->a0 = ch;
+                    break;
+                }
+                // 다른 프로세스도 실행가능하도록 yield 해준다.
+                yield();
+            }
+            break;
+        // 생략
+    }
+}
+```
+
+이제 쉘을 구현할 수 있다. 먼저 프롬프트를 읽어오는 함수를 만들자.
+```c
+// shell.c
+#define PROMPT_SUCCESS 0
+#define PROMPT_TOO_LONG 1
+
+int get_prompt(char* prompt, int max_length) {
+    int i;
+    // 최대 길이를 넘기 전까지 루프를 돌며 키보드 입력을 받아온다.
+    for (i = 0; i < max_length; i++) {
+        char ch = getchar();
+        if (ch == '\r') {
+            // 엔터를 쳤을 경우에 프롬프트 입력을 종료한다.
+            putchar('\n');
+            prompt[i] = '\0';
+            break;
+        } else {
+            // 다른 문자 입력 시 터미널에 입력된 문자를 보여준다.
+            putchar(ch);
+            prompt[i] = ch;
+        }
+    }
+    
+    if (i == max_length) {
+        putchar('\n');
+        return PROMPT_TOO_LONG;
+    }
+    
+    return PROMPT_SUCCESS;
+}
+```
+
+메인 함수에서는 프롬프트를 읽어와서 알맞는 동작을 수행한다. 
+
+```c
+// shell.c
+#define PROMPT_MAX_LEN 10
+
+// 생략 
+
+void main(void) {
+    while(1) {
+        // 루프를 돌며 프롬프트 입력을 받는다.
+        putchar('>');
+        char prompt[PROMPT_MAX_LEN];
+        int result = get_prompt(prompt, PROMPT_MAX_LEN);
+        
+        if (result == PROMPT_SUCCESS) {
+            // 프롬프트 입력 처리
+            if (strcmp(prompt, "say hello") == 0) {
+                printf("Hello world from shell!\n");
+            } else {
+                printf("unknown prompt: %s\n", prompt);
+            }
+        } else {
+            // 예외 처리
+            switch (result) {
+                case PROMPT_TOO_LONG:
+                    printf("prompt too long\n");
+                    break;
+                default:
+                    printf("unknown error while reading prompt\n");
+                    break;
+            }
+        }
+    }
+}
+```
+
+이제 `./run.sh`를 실행시키고 `say hello`를 입력하면 다음과 같은 결과를 볼 수 있다.
+```shell
+>say hello
+Hello world from shell!
+```
+
+#### 프로세스 종료 (exit 시스템 콜)
+
+마지막으로 프로세스를 종료하는 exit 시스템 콜을 구현하자.
+
+```c
+// common.h
+#define SYS_EXIT    3
+
+// user.c
+__attribute__((noreturn))
+    void exit(void) {
+    syscall(SYS_EXIT, 0, 0, 0);
+    for (;;);
+}
+
+// kernel.h
+#define PROC_EXITED 2
+
+// kernel.c
+void handle_syscall(struct trap_frame* f) {
+    switch (f->a3) {
+    // 생략 
+    case SYS_EXIT:
+        printf("process %d exited\n", current_proc->pid);
+        // 단순화를 위해 메모리 해제 등 자원 반납은 구현하지 않았다.
+        current_proc->state = PROC_EXITED;
+        yield();
+        PANIC("unreachable");
+        break;
+    // 생략
+    }
+}
+```
+
+마지막으로 `shell.c`에 종료 프롬프트 처리를 만들어 준다.
+```c
+void main(void) {
+    while(1) {
+        putchar('>');
+        char prompt[PROMPT_MAX_LEN];
+        int result = get_prompt(prompt, PROMPT_MAX_LEN);
+        if (result == PROMPT_SUCCESS) {
+            if (strcmp(prompt, "say hello") == 0) {
+                printf("Hello world from shell!\n");
+            // 여기에 추가한다.
+            } else if (strcmp(prompt, "exit") == 0) {
+                printf("Goodbye\n");
+                exit();
+            } else {
+                printf("unknown prompt: %s\n", prompt);
+            }
+        } else {
+            switch (result) {
+                case PROMPT_TOO_LONG:
+                    printf("prompt too long\n");
+                    break;
+                default:
+                    printf("unknown error while reading prompt\n");
+                    break;
+            }
+        }
+    }
+}
+```
+
+`./run.sh`를 실행시키고 `exit`를 입력하면 다음과 같은 결과를 볼 수 있다. 프로세스 종료 후 idle 프로세스로 전환되어 커널패닉이 일어난다.
+```shell
+>exit
+Goodbye
+process 1 exited
+PANIC: kernel.c:362 switched to idle process
+```

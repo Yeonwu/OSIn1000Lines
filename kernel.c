@@ -10,6 +10,7 @@ typedef uint32_t size_t;
 extern char __kernel_base[];
 extern char __bss[], __bss_end[], __stack_top[];
 extern char __free_ram[], __free_ram_end[];
+extern char _binary_shell_bin_start[], _binary_shell_bin_size[];
 
 struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4, long arg5, long fid, long eid) {
     register long a0 __asm__("a0") = arg0;
@@ -33,12 +34,9 @@ void putchar(char ch) {
     sbi_call(ch, 0, 0, 0, 0, 0, 0, 1);
 }
 
-void handle_trap(struct trap_frame* f) {
-    uint32_t scause = READ_CSR(scause);
-    uint32_t stval = READ_CSR(stval);
-    uint32_t user_pc = READ_CSR(sepc);
-
-    PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
+long getchar(void) {
+    struct sbiret ret = sbi_call(0, 0, 0, 0, 0, 0, 0, 2);
+    return ret.error;
 }
 
 __attribute__((naked))
@@ -201,9 +199,21 @@ void switch_context(uint32_t *prev_sp, uint32_t *next_sp) {
             );
 }
 
+__attribute__((naked))
+void user_entry(void) {
+    __asm__ __volatile__(
+            "csrw sepc, %[sepc]     \n"
+            "csrw sstatus, %[sstatus]   \n"
+            "sret"
+            :
+            : [sepc] "r" (USER_BASE),
+              [sstatus] "r" (SSTATUS_SPIE)
+            );
+}
+
 struct process procs[PROCS_MAX];
 
-struct process* create_process(uint32_t entry_point) {
+struct process* create_process(const void *image, size_t image_size) {
     uint8_t i;
     struct process* proc = NULL;
 
@@ -230,7 +240,7 @@ struct process* create_process(uint32_t entry_point) {
     *--sp = 0; // s2;
     *--sp = 0; // s1;
     *--sp = 0; // s0;
-    *--sp = entry_point; // ra;
+    *--sp = (uint32_t) user_entry; // ra;
 
     paddr_t page_table = alloc_pages(1);
     for (
@@ -244,6 +254,21 @@ struct process* create_process(uint32_t entry_point) {
             addr,
             PAGE_R | PAGE_W | PAGE_X
             );
+    }
+
+    for (uint32_t offset = 0; offset < image_size; offset += PAGE_SIZE) {
+        paddr_t page = alloc_pages(1);
+
+        size_t remaining = image_size - offset;
+        size_t copy_size = PAGE_SIZE <= remaining ? PAGE_SIZE : remaining;
+
+        memcpy((void *)page, image + offset, copy_size);
+        map_page(
+                (uint32_t *)page_table,
+                USER_BASE + offset,
+                page,
+                PAGE_U | PAGE_R | PAGE_W | PAGE_X
+                );
     }
 
     proc->pid = i;
@@ -280,31 +305,46 @@ void yield() {
     switch_context(&prev_proc->sp, &next_proc->sp);
 }
 
-void delay() {
-    for (int i = 0; i < 30000000; i++) {
-        __asm__ ("nop");
+void handle_syscall(struct trap_frame* f) {
+    switch (f->a3) {
+        case SYS_PUTCHAR:
+            putchar(f->a0);
+            break;
+        case SYS_GETCHAR:
+            while(1) {
+                long ch = getchar();
+                if (ch >= 0) {
+                    f->a0 = ch;
+                    break;
+                }
+
+                yield();
+            }
+            break;
+        case SYS_EXIT:
+            printf("process %d exited\n", current_proc->pid);
+            current_proc->state = PROC_EXITED;
+            yield();
+            PANIC("unreachable");
+            break;
+        default:
+            PANIC("unexpected syscall a3=%x\n", f->a3);
     }
 }
 
-struct process *proc_a;
-struct process *proc_b;
+void handle_trap(struct trap_frame* f) {
+    uint32_t scause = READ_CSR(scause);
+    uint32_t stval = READ_CSR(stval);
+    uint32_t user_pc = READ_CSR(sepc);
 
-void proc_a_entry() {
-    printf("start process a\n");
-    while(1) {
-        printf("pid %d A\n", proc_a->pid);
-        delay();
-        yield();
+    if (scause == SCAUE_ECALL) {
+        handle_syscall(f);
+        user_pc += 4;
+    } else {
+        PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
     }
-}
 
-void proc_b_entry() {
-    printf("start process b\n");
-    while(1) {
-        printf("pid %d B\n", proc_b->pid);
-        delay();
-        yield();
-    }
+    WRITE_CSR(sepc, user_pc);
 }
 
 void kernel_main(void) {
@@ -312,15 +352,13 @@ void kernel_main(void) {
 
     WRITE_CSR(stvec, (uint32_t) kernel_entry);
 
-    idle_proc = create_process((uint32_t) NULL);
+    idle_proc = create_process(NULL, 0);
     idle_proc->pid = -1;
     current_proc = idle_proc;
 
-    proc_a = create_process((uint32_t) proc_a_entry);
-    proc_b = create_process((uint32_t) proc_b_entry);
+    create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);
 
     yield();
-
     PANIC("switched to idle process");
 }
 

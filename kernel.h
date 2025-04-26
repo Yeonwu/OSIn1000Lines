@@ -69,8 +69,9 @@ struct trap_frame {
 
 #define PROCS_MAX 8
 
-#define PROC_UNUSED 0
+#define PROC_UNUSED   0
 #define PROC_RUNNABLE 1
+#define PROC_EXITED   2
 
 struct process {
     int pid;
@@ -87,6 +88,13 @@ struct process {
 #define PAGE_X    (1 << 3)
 #define PAGE_U    (1 << 4)
 
+#define USER_BASE 0x1000000
 
+#define SSTATUS_SPIE (1<<5)
+
+#define SCAUE_ECALL 8
+
+
+void yield();
 
 #endif //OSIN1000LINES_KERNEL_H
