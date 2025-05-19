@@ -15,7 +15,7 @@ void *memset(void *buf, char c, size_t n) {
     return buf;
 }
 
-void *memcpy(void *dst, void *src, size_t n) {
+void *memcpy(void *dst, const void *src, size_t n) {
     uint8_t *p_src = (uint8_t *)src;
     uint8_t *p_dst = (uint8_t *)dst;
 
